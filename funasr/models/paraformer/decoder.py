@@ -688,20 +688,22 @@ class ParaformerSANMDecoderExport(torch.nn.Module):
     def forward(
         self,
         hs_pad: torch.Tensor,
-        hlens: torch.Tensor,
+        # hlens: torch.Tensor,
         ys_in_pad: torch.Tensor,
-        ys_in_lens: torch.Tensor,
+        # ys_in_lens: torch.Tensor,
+        masks: torch.Tensor,
         return_hidden: bool = False,
         return_both: bool = False,
     ):
         
         tgt = ys_in_pad
-        tgt_mask = self.make_pad_mask(ys_in_lens)
-        tgt_mask, _ = self.prepare_mask(tgt_mask)
+        # tgt_mask = self.make_pad_mask(ys_in_lens)
+        tgt_mask, _ = self.prepare_mask(masks)
         # tgt_mask = myutils.sequence_mask(ys_in_lens, device=tgt.device)[:, :, None]
         
         memory = hs_pad
-        memory_mask = self.make_pad_mask(hlens)
+        # memory_mask = self.make_pad_mask(hlens)
+        memory_mask = torch.ones([1, 67], device=memory.device)
         _, memory_mask = self.prepare_mask(memory_mask)
         # memory_mask = myutils.sequence_mask(hlens, device=memory.device)[:, None, :]
         
@@ -721,11 +723,14 @@ class ParaformerSANMDecoderExport(torch.nn.Module):
         
         if self.output_layer is not None and return_hidden is False:
             x = self.output_layer(hidden)
-            return x, ys_in_lens
+            # return x, ys_in_lens
+            return x
         if return_both:
             x = self.output_layer(hidden)
-            return x, hidden, ys_in_lens
-        return hidden, ys_in_lens
+            # return x, hidden, ys_in_lens
+            return x, hidden
+        # return hidden, ys_in_lens
+        return hidden
     
     def forward_asf2(
         self,

@@ -537,12 +537,13 @@ class SANMEncoderExport(nn.Module):
     
     def forward(self,
                 speech: torch.Tensor,
-                speech_lengths: torch.Tensor,
+                # speech_lengths: torch.Tensor,
                 online: bool = False
                 ):
         if not online:
             speech = speech * self._output_size ** 0.5
-        mask = self.make_pad_mask(speech_lengths)
+        # mask = self.make_pad_mask(speech_lengths)
+        mask = torch.ones([1, 67], device=speech.device)
         mask = self.prepare_mask(mask)
         if self.embed is None:
             xs_pad = speech
@@ -557,7 +558,8 @@ class SANMEncoderExport(nn.Module):
         
         xs_pad = self.model.after_norm(xs_pad)
         
-        return xs_pad, speech_lengths
+        # return xs_pad, speech_lengths
+        return xs_pad
     
     def get_output_size(self):
         return self.model.encoders[0].size

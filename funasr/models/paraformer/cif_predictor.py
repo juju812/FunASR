@@ -395,9 +395,12 @@ class CifPredictorV2Export(torch.nn.Module):
         mask = mask.transpose(-1, -2).float()
         mask = mask.squeeze(-1)
         hidden, alphas, token_num = self.tail_process_fn(hidden, alphas, mask=mask)
-        acoustic_embeds, cif_peak = cif_export(hidden, alphas, self.threshold)
+        # acoustic_embeds, cif_peak = cif_export(hidden, alphas, self.threshold)
+        acoustic_embeds, cif_peak, token_masks = cif_export(hidden, alphas, self.threshold)
         
-        return acoustic_embeds, token_num, alphas, cif_peak
+        # return acoustic_embeds, token_num, alphas, cif_peak
+        return acoustic_embeds, token_masks, alphas, cif_peak
+        # return acoustic_embeds, token_num, alphas, cif_peak, token_masks
     
     def forward_cnn(self, hidden: torch.Tensor,
                     mask: torch.Tensor,
@@ -439,26 +442,30 @@ class CifPredictorV2Export(torch.nn.Module):
         
         return hidden, alphas, token_num_floor
 
-@torch.jit.script
+
 def cif_export(hidden, alphas, threshold: float):
     batch_size, len_time, hidden_size = hidden.size()
-    threshold = torch.tensor([threshold], dtype=alphas.dtype).to(alphas.device)
+    threshold = torch.tensor([threshold], dtype=alphas.dtype, device=alphas.device)
     
     # loop varss
-    integrate = torch.zeros([batch_size], dtype=alphas.dtype, device=hidden.device)
+    integrate = torch.zeros([batch_size], dtype=alphas.dtype, device=alphas.device)
     frame = torch.zeros([batch_size, hidden_size], dtype=hidden.dtype, device=hidden.device)
     # intermediate vars along time
-    list_fires = []
-    list_frames = []
-    
+    # list_fires = []
+    # list_frames = []
+    fires = torch.ones([batch_size, len_time], device=hidden.device)  # [1, 68]
+    frames = torch.zeros([batch_size, len_time, hidden_size], device=hidden.device) # [1, 68, 512]
+    fire_place_helper = torch.ones([batch_size, hidden_size], device=hidden.device) # [1, 512]
     for t in range(len_time):
-        alpha = alphas[:, t]
+    #for t in range(68):
+        alpha = alphas[:, t] # [1,1]
         distribution_completion = torch.ones([batch_size], dtype=alphas.dtype, device=hidden.device) - integrate
         
-        integrate += alpha
-        list_fires.append(integrate)
+        integrate += alpha # [1,1]
+        # list_fires.append(integrate)
+        fires[:, t] = integrate
         
-        fire_place = integrate >= threshold
+        fire_place = integrate >= threshold # [1,1]
         integrate = torch.where(fire_place,
                                 integrate - torch.ones([batch_size], dtype=alphas.dtype, device=hidden.device),
                                 integrate)
@@ -468,27 +475,75 @@ def cif_export(hidden, alphas, threshold: float):
         remainds = alpha - cur
         
         frame += cur[:, None] * hidden[:, t, :]
-        list_frames.append(frame)
-        frame = torch.where(fire_place[:, None].repeat(1, hidden_size),
-                            remainds[:, None] * hidden[:, t, :],
-                            frame)
+        # list_frames.append(frame)
+        # real_frame = torch.where(fire_place[:, None].repeat(1, hidden_size),
+        frames[:, t, :] = frame
+        # fp = fire_place[:, None].repeat(1, hidden_size)
+        fp = fire_place * fire_place_helper == fire_place_helper
+        rs = remainds[:, None] * hidden[:, t, :]
+        # frame = torch.where(fire_place[:, None].repeat(1, hidden_size),
+        #                     remainds[:, None] * hidden[:, t, :],
+        #                     frame)
+        frame = torch.where(fp, rs, frame) # 在这里已经能够判断frame是rs还是frame
     
-    fires = torch.stack(list_fires, 1)
-    frames = torch.stack(list_frames, 1)
+    # fires = torch.stack(list_fires, 1)
+    # frames = torch.stack(list_frames, 1)
     
     fire_idxs = fires >= threshold
+    idxs = fire_idxs[0]
     frame_fires = torch.zeros_like(hidden)
-    max_label_len = frames[0, fire_idxs[0]].size(0)
-    for b in range(batch_size):
-        frame_fire = frames[b, fire_idxs[b]]
-        frame_len = frame_fire.size(0)
-        frame_fires[b, :frame_len, :] = frame_fire
-        
-        if frame_len >= max_label_len:
-            max_label_len = frame_len
-    frame_fires = frame_fires[:, :max_label_len, :]
-    return frame_fires, fires
 
+    # frame_fire = frames[0, idxs, :]
+    # frame_len = frame_fire.size(0)
+    # frame_fires[0, :frame_len, :] = frame_fire
+    # frame_fires = frame_fires[:, :20, :]
+    # idxs_diag = idxs * torch.ones(len_time, len_time, dtype=torch.float32) * torch.eye(len_time, len_time, dtype=torch.float32)
+
+    # frames = torch.matmul(idxs_diag, frames)
+    frames = frames[:, idxs]
+    # return_frames = torch.cat([frames, torch.zeros(batch_size, len_time, hidden_size)], dim=1)
+    # return_frames = return_frames[:, :len_time]
+    # _, frame_len, _ = frames.size()
+    # frame_zeros = torch.zeros(batch_size, len_time, hidden_size)
+    # frame_zeros[:, :5, :] = frames[:, :5, :]
+    # frames = padding_frames(frames, torch.tensor(len_time))
+    # frames = torch.cat([frames, frame_zeros], 1)
+    # frames = frames[:, :20, :]
+    # token_len = torch.min(torch.tensor([20, frames.size(1)]))
+    # frame_fires[:, :20] = frames[:, :20]
+
+    # frame_fire = frames[0, idxs]
+    # frame_len = frame_fire.size(0)
+    # frame_fires[0, :frame_len, :] = frame_fire
+    # max_label_len = frames[0, fire_idxs[0]].size(0)
+    # for b in range(batch_size):
+    #     frame_fire = frames[b, fire_idxs[b]]
+    #     frame_len = frame_fire.size(0)
+    #     frame_fires[b, :frame_len, :] = frame_fire
+        
+    #     if frame_len >= max_label_len:
+    #         max_label_len = frame_len
+    # frame_fires = frame_fires[:, :20, :]
+    # return frame_fires, fires
+
+    # for masks
+    token_masks = torch.ones([batch_size, len_time], device=hidden.device)
+    token_masks = token_masks[:, idxs].sum(-1) # 在qnn中这里已经变成全1,onnx中 结果是
+    # token_masks = torch.cat([token_masks, torch.zeros(batch_size, len_time)], dim=1)
+    # token_masks = token_masks[:, :len_time]
+    real_masks = torch.zeros([batch_size, len_time], device=hidden.device) + token_masks
+    real_masks[0][2] = 0
+    # token_masks = idxs
+    # token_masks_zeros_helper = torch.zeros_like(idxs)
+    
+    # idxs的sum可以返回,token_num却不行
+    return frames, fires, idxs.sum(-1)
+
+def padding_frames(frames, max_label_len: torch.Tensor):
+    batch_size, len_time, hidden_size = frames.size()
+    frame_zeros = torch.zeros([batch_size, max_label_len, hidden_size], device=frames.device)
+    frame_zeros[:, :len_time, :] = frames
+    return frame_zeros
 
 class mae_loss(torch.nn.Module):
 

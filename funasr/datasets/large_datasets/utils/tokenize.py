@@ -90,6 +90,6 @@ def tokenize(data,
         data["punc"] =  np.array(punc_token)
 
     data["text"] = np.array(token)
-    if vad is not -2:
+    if vad != -2:
         data["vad_indexes"]=np.array([vad], dtype=np.int64)
     return data
