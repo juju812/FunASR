@@ -17,7 +17,7 @@ from funasr.models.paraformer.cif_predictor import CifPredictorV2Export
 from funasr.models.paraformer.decoder import ParaformerSANMDecoderExport
 from funasr.utils.load_utils import load_audio_text_image_video, extract_fbank
 from funasr.models.paraformer.search import Hypothesis
-from funasr.bin.compute_wer import Wer
+from compute_wer import Wer
 
 # from aimet_common.quantsim_config import quantsim_config
 
@@ -60,14 +60,14 @@ class AsrDataset(Dataset):
     def __getitem__(self, idx):
         data, key = self.data_list[idx], self.key_list[idx]
         audio_fs = self.kwargs.get("fs", 16000)
-        audio_sample_list = load_audio_text_image_video(data, fs=self.frontend.fs, audio_fs=audio_fs, data_type=self.kwargs.get("data_type", "sound"), tokenizer=self.tokenizer)
+        audio_sample = load_audio_text_image_video(data, fs=self.frontend.fs, audio_fs=audio_fs, data_type=self.kwargs.get("data_type", "sound"), tokenizer=self.tokenizer)
         # pad audio samples to the same length
-        if audio_sample_list.size(0) > self.padding_seconds * audio_fs:
-            # audio_sample_list = audio_sample_list[: int(self.padding_seconds * audio_fs)]
+        if audio_sample.size(0) > self.padding_seconds * audio_fs:
+            # audio_sample = audio_sample[: int(self.padding_seconds * audio_fs)]
             return torch.tensor([]), ""
         else:
-            audio_sample_list = nn.functional.pad(audio_sample_list, (0, int(self.padding_seconds * audio_fs) - audio_sample_list.size(0)))
-        speech, _ = extract_fbank(audio_sample_list, data_type=self.kwargs.get("data_type", "sound"), frontend=self.frontend)
+            audio_sample = nn.functional.pad(audio_sample, (0, int(self.padding_seconds * audio_fs) - audio_sample.size(0)))
+        speech, _ = extract_fbank(audio_sample, data_type=self.kwargs.get("data_type", "sound"), frontend=self.frontend)
         return speech.squeeze(dim=0), key
 
 
@@ -136,7 +136,7 @@ init_model_args = {
 	"frontend_conf": {
 		"cmvn_file": "/project/asr_game_test/01_asr/04_funasr_latest/FunASR-1.0.14-v2/examples/industrial_data_pretraining/modelscope_models/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/am.mvn"
 	},
-	# "input": "/root/FunASR/funasr/bin/cbt1_testset_wo_prelabel/wav.scp",
+	# "input": "/root/FunASR/funasr/bin/cbt1_testset_wo_prelabel/wav_1.scp",
     "input": "/root/FunASR/funasr/bin/cbt1_testset_wo_prelabel/wav_filtered.scp",
 	"output_dir": "/root/FunASR/funasr/bin/outputs_zh-tw_balance_paraformer_offline_v204_cbt1_testset_wo_prelabel",
 	"device": "cuda:0"
@@ -186,40 +186,42 @@ class UnlabeledDatasetWrapper(Dataset):
         input, _ = self._dataset[index]
         return input
 
-unlabeled_dataset = UnlabeledDatasetWrapper(eval_dataset)
-# unlabeled_dataset = UnlabeledDatasetWrapper(calibration_dataset)
-unlabeled_data_loader = _create_sampled_data_loader(unlabeled_dataset, CALIBRATION_DATASET_SIZE)
+# unlabeled_dataset = UnlabeledDatasetWrapper(eval_dataset)
+# # unlabeled_dataset = UnlabeledDatasetWrapper(calibration_dataset)
+# unlabeled_data_loader = _create_sampled_data_loader(unlabeled_dataset, CALIBRATION_DATASET_SIZE)
 
 # Step 4. Prepare eval callback
 # NOTE: In the actual use cases, the users should implement this part to serve
 #       their own goals if necessary.
 
 
-def post_process(key, decoder_out, pre_token_length, wer):
-    am_scores = decoder_out[0, :pre_token_length, :]
+def post_process(keys, decoder_out, pre_token_length, wer):
+    batch_size = decoder_out.size(0)
+    for i in range(batch_size):
+        am_scores = decoder_out[i, :pre_token_length, :]
 
-    yseq = am_scores.argmax(dim=-1)
-    score = am_scores.max(dim=-1)[0]
-    score = torch.sum(score, dim=-1)
-    # pad with mask tokens to ensure compatibility with sos/eos tokens
-    yseq = torch.tensor(
-        [paraformer_model.sos] + yseq.tolist() + [paraformer_model.eos], device=yseq.device
-    )
-    hyp = Hypothesis(yseq=yseq, score=score)
+        yseq = am_scores.argmax(dim=-1)
+        score = am_scores.max(dim=-1)[0]
+        score = torch.sum(score, dim=-1)
+        # pad with mask tokens to ensure compatibility with sos/eos tokens
+        yseq = torch.tensor(
+            [paraformer_model.sos] + yseq.tolist() + [paraformer_model.eos], device=yseq.device
+        )
+        hyp = Hypothesis(yseq=yseq, score=score)
 
-    # remove sos/eos and get results
-    last_pos = -1
-    if isinstance(hyp.yseq, list):
-        token_int = hyp.yseq[1:last_pos]
-    else:
-        token_int = hyp.yseq[1:last_pos].tolist()
+        # remove sos/eos and get results
+        last_pos = -1
+        if isinstance(hyp.yseq, list):
+            token_int = hyp.yseq[1:last_pos]
+        else:
+            token_int = hyp.yseq[1:last_pos].tolist()
+            
+        # remove blank symbol id, which is assumed to be 0
+        token_int = list(filter(lambda x: x != paraformer_model.eos and x != paraformer_model.sos and x != paraformer_model.blank_id, token_int))
         
-    # remove blank symbol id, which is assumed to be 0
-    token_int = list(filter(lambda x: x != paraformer_model.eos and x != paraformer_model.sos and x != paraformer_model.blank_id, token_int))
-    
-    # Change integer-ids to tokens
-    token = tokenizer.ids2tokens(token_int)
-    wer.compute_wer(key, token)  
+        # Change integer-ids to tokens
+        token = tokenizer.ids2tokens(token_int)
+        wer.compute_wer(keys[i], token)  
 
 
 def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> float:
@@ -230,12 +232,13 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
     wer = Wer("/root/FunASR/funasr/bin/cbt1_testset_wo_prelabel/text")
     pbar = tqdm(colour="blue", total=num_samples, dynamic_ncols=True)
 
-    # FIXME: not support batch size > 1
-    for input, key in eval_data_loader:
-        if input.numel() == 0:
+    # FIXME: batch_size should be 1, due to fixed shape in models
+    for inputs, keys in eval_data_loader:
+        if inputs.numel() == 0:
             continue
-        input_cuda = input.cuda()
-        encoder_out = model(input_cuda)
+        # torch.save(inputs, 'inputs.pt')
+        inputs_cuda = inputs.cuda()
+        encoder_out = model(inputs_cuda)
         # torch.save(encoder_out, 'encoder_out.pt')
         pre_acoustic_embeds, pre_token_length = predictor_model(encoder_out)
         # 将pre_acoustic_embeds填充至(1, 68, 512)
@@ -246,16 +249,17 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
         masks = torch.zeros(1, 68).cuda()
         masks[0, :pre_token_length] = 1
         decoder_out = decoder_model(encoder_out, pre_acoustic_embeds, masks)
-        post_process(key, decoder_out, pre_token_length, wer)
+        post_process(keys, decoder_out, pre_token_length, wer)
         pbar.update(1)
 
     return wer.summary()
 
 for _ in range(1):
-    LOG.info(f"eval result: {eval_callback(encoder_model)}")
+    eval_result = eval_callback(encoder_model)
+    LOG.info(f"eval result: {eval_result}, WER: {1 - eval_result:.4f}")
 
 
-# dummy_input = get_dummy_input()
+dummy_input = torch.load("inputs.pt")
 
 # # Step 5. Create AutoQuant object
 # dummy_input_cuda = tuple(i.cuda() for i in dummy_input)

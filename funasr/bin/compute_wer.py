@@ -140,7 +140,7 @@ class Wer(object):
 
         return rst
 
-    def print_cer_detail(rst):
+    def print_cer_detail(self, rst):
         return ("(" + "nwords=" + str(rst['nwords']) + ",cor=" + str(rst['cor'])
                 + ",ins=" + str(rst['ins']) + ",del=" + str(rst['del']) + ",sub="
                 + str(rst['sub']) + ") corr:" + '{:.2%}'.format(rst['cor']/rst['nwords'])
