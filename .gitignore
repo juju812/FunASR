@@ -27,4 +27,6 @@ GPT-SoVITS*
 modelscope_models
 examples/aishell/llm_asr_nar/*
 cbt1_testset_wo_prelabel
+quant_data_encoder
+quant_data_decoder
 .vscode

@@ -395,11 +395,16 @@ class SinusoidalPositionEncoder(torch.nn.Module):
         batch_size = positions.size(0)
         positions = positions.type(dtype)
         device = positions.device
+        # [HEJUN]: log_timescale_increment will be considered as constant will tracing, it's OK for value of depth always 560
         log_timescale_increment = torch.log(torch.tensor([10000], dtype=dtype, device=device)) / (depth / 2 - 1)
         inv_timescales = torch.exp(torch.arange(depth / 2, device=device).type(dtype) * (-log_timescale_increment))
         inv_timescales = torch.reshape(inv_timescales, [batch_size, -1])
         scaled_time = torch.reshape(positions, [1, -1, 1]) * torch.reshape(inv_timescales, [1, 1, -1])
-        encoding = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=2)
+        # [HEJUN]：hack for aimet, get rid of concat
+        # encoding = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=2)
+        encoding = torch.empty(*scaled_time.shape[:2], 2 * scaled_time.shape[2], device=device)
+        encoding[..., :scaled_time.shape[2]] = torch.sin(scaled_time)
+        encoding[..., scaled_time.shape[2]:] = torch.cos(scaled_time)
         return encoding.type(dtype)
 
     def forward(self, x):

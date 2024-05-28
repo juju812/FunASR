@@ -10,6 +10,7 @@ from tqdm import tqdm
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler
+import onnxruntime as ort
 
 from funasr.auto.auto_model import AutoModel, prepare_data_iterator
 from funasr.models.sanm.encoder import SANMEncoderExport
@@ -18,18 +19,6 @@ from funasr.models.paraformer.decoder import ParaformerSANMDecoderExport
 from funasr.utils.load_utils import load_audio_text_image_video, extract_fbank
 from funasr.models.paraformer.search import Hypothesis
 from compute_wer import Wer
-
-from aimet_common.quantsim_config import quantsim_config
-
-quantsim_config.ENFORCE_TARGET_DTYPE_BITWIDTH_CONFIG = True
-
-from aimet_common.defs import QuantizationDataType
-
-from aimet_torch.pro.model_preparer import prepare_model as prepare_model_pro
-from aimet_torch.model_validator.model_validator import ModelValidator
-from aimet_torch.adaround.adaround_weight import AdaroundParameters
-from aimet_torch.pro.auto_quant_v2 import AutoQuant
-from aimet_torch.onnx_utils import OnnxExportApiArgs
 
 
 
@@ -46,9 +35,7 @@ LOG = logging.getLogger()
 LOG.addHandler(handler)
 
 
-def encoder_predictor_forward(inputs_cuda: torch.Tensor, encoder_model, predictor_model: nn.Module):
-    # torch.save(inputs_cuda, 'encoder_inputs.pt')
-    encoder_out = encoder_model(inputs_cuda)
+def predictor_forward(encoder_out: torch.Tensor, predictor_model: nn.Module):
     # torch.save(encoder_out, 'encoder_out.pt')
     pre_acoustic_embeds, pre_token_length = predictor_model(encoder_out)
     # 将pre_acoustic_embeds填充至(1, 68, 512)
@@ -60,7 +47,7 @@ def encoder_predictor_forward(inputs_cuda: torch.Tensor, encoder_model, predicto
     masks[0, :pre_token_length] = 1
     # torch.save(pre_acoustic_embeds, 'pre_acoustic_embeds.pt')
     # torch.save(masks, 'masks.pt')
-    return encoder_out, pre_acoustic_embeds, pre_token_length, masks
+    return pre_acoustic_embeds, pre_token_length, masks
 
 
 class AsrDataset(Dataset):
@@ -99,7 +86,8 @@ class AsrDataset(Dataset):
 
         # decoder dataset
         inputs_cuda = speech.cuda()
-        encoder_out, pre_acoustic_embeds, pre_token_length, masks = encoder_predictor_forward(inputs_cuda, self.encoder_model, self.predictor_model)
+        encoder_out = self.encoder_model(inputs_cuda)
+        pre_acoustic_embeds, pre_token_length, masks = predictor_forward(encoder_out, self.predictor_model)
         return (encoder_out.squeeze(dim=0).cpu(), pre_acoustic_embeds.squeeze(dim=0).cpu(), masks.squeeze(dim=0).cpu()), key
 
 
@@ -142,7 +130,7 @@ class ParaformerDecoder(nn.Module):
 
 # ==================================================================================
 # Step 1. Define constants and helper functions
-QUANT_TARGET = "decoder"  # encoder or decoder
+EVAL_TARGET = "encoder"  # encoder or decoder
 # EVAL_DATASET_SIZE = 1571
 EVAL_DATASET_SIZE = 1114
 CALIBRATION_DATASET_SIZE = 1000
@@ -235,21 +223,28 @@ def post_process(keys, decoder_out, pre_token_length, wer):
         wer.compute_wer(keys[i], token)  
 
 
-if QUANT_TARGET == "encoder":
+if EVAL_TARGET == "encoder":
     quant_model = encoder_model
     dummy_input = torch.load("encoder_inputs.pt").cuda()
     input_names = ["speech"]
     output_names = ["xs_pad"]
     eval_dataset = AsrDataset(init_model_args["input"], automodel_kwargs)
+    ort_session = ort.InferenceSession("/root/asr_w8a16/w8a16_asr_encoder.onnx")
 else:
     quant_model = decoder_model
     dummy_input = torch.load("encoder_out.pt").cuda(), torch.load("pre_acoustic_embeds.pt").cuda(), torch.load("masks.pt").cuda()
     input_names = ["encoder_out", "pre_acoustic_embeds", "masks"]
     output_names = ["logits"]
     eval_dataset = AsrDataset(init_model_args["input"], automodel_kwargs, encoder_model, predictor_model)
+    ort_session = ort.InferenceSession("/root/asr_w8a16/w8a16_asr_decoder.onnx")
+
+if 'CUDAExecutionProvider' in ort.get_available_providers():
+    ort_session.set_providers(['CUDAExecutionProvider'])
+else:
+    LOG.warning("WARNING: CUDAExecutionProvider not available, fallback to CPU.")
 
 
-def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> float:
+def eval_onnx_model(ort_session: ort.InferenceSession, num_samples: Optional[int] = None) -> float:
     if num_samples is None:
         num_samples = len(eval_dataset)
 
@@ -258,97 +253,39 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
     pbar = tqdm(colour="blue", total=num_samples, dynamic_ncols=True)
 
     with torch.no_grad():
-        for inputs, keys in eval_data_loader:
-            if isinstance(inputs, torch.Tensor) and inputs.numel() == 0:
-                continue
-            # FIXME: batch_size should be 1, due to fixed shape in models
-            if QUANT_TARGET == "encoder":
-                inputs = inputs.cuda()
-                encoder_out, pre_acoustic_embeds, pre_token_length, masks = encoder_predictor_forward(inputs, model, predictor_model)
+        # FIXME: batch_size should be 1, due to fixed shape in models
+        if EVAL_TARGET == "encoder":
+            for inputs, keys in eval_data_loader:
+                if isinstance(inputs, torch.Tensor) and inputs.numel() == 0:
+                    continue
+                # onnxruntime inference
+                ort_inputs = {ort_session.get_inputs()[0].name: inputs.numpy()}
+                encoder_out = ort_session.run(None, ort_inputs)[0]
+                encoder_out = torch.tensor(encoder_out).cuda()
+
+                pre_acoustic_embeds, pre_token_length, masks = predictor_forward(inputs, predictor_model)
                 decoder_out = decoder_model(encoder_out, pre_acoustic_embeds, masks)
                 post_process(keys, decoder_out, pre_token_length, wer)
                 pbar.update(1)
-            else:
-                encoder_out = inputs[0].cuda()
-                pre_acoustic_embeds = inputs[1].cuda()
-                masks = inputs[2].cuda()
-                pre_token_length = torch.sum(masks == 1, dim=1).item()
-                decoder_out = model(encoder_out, pre_acoustic_embeds, masks)
+        else:
+            for inputs, keys in eval_data_loader:
+                if isinstance(inputs, torch.Tensor) and inputs.numel() == 0:
+                    continue
+                pre_token_length = torch.sum(inputs[2] == 1, dim=1).item()
+                ort_inputs = {
+                    ort_session.get_inputs()[0].name: inputs[0].numpy(),
+                    ort_session.get_inputs()[1].name: inputs[1].numpy(),
+                    ort_session.get_inputs()[2].name: inputs[2].numpy()
+                }
+                decoder_out = ort_session.run(None, ort_inputs)[0]
+                decoder_out = torch.tensor(decoder_out).cuda()
+                # decoder_out = decoder_model(encoder_out, pre_acoustic_embeds, masks)
                 post_process(keys, decoder_out, pre_token_length, wer)
                 pbar.update(1)
 
 
     return wer.summary()
 
-# for _ in range(1):
-#     eval_result = eval_callback(quant_model)
-#     LOG.info(f"eval result: {eval_result}, WER: {1 - eval_result:.4f}")
-
-# prepared_model = prepare_model_pro(quant_model, dummy_input)
-# prepared_model = prepare_model_pro(quant_model, dummy_input, onnx_export_args={"do_constant_folding": False})
-
-# valid = ModelValidator.validate_model(quant_model, model_input=dummy_input)
-# LOG.info(f"Model validation result: {valid}")
-
-# predictor_dummy_input = torch.load('encoder_out.pt')
-
-# with torch.no_grad():
-#     torch.onnx.export(
-#         predictor_model.cpu(),
-#         predictor_dummy_input.cpu(), 
-#         "predictor.onnx",
-#         verbose=False,
-#         opset_version=13,
-#         do_constant_folding=True,
-#         input_names=['encoder_out'],
-#         output_names=["pre_acoustic_embeds", "pre_token_length"]
-#         # dynamic_axes=model.export_dynamic_axes()
-#     )
-# LOG.info(f"predictor model is saved as 'predictor.onnx'")
-
-unlabeled_dataset = UnlabeledDatasetWrapper(eval_dataset)
-# unlabeled_dataset = UnlabeledDatasetWrapper(calibration_dataset)
-unlabeled_data_loader = _create_sampled_data_loader(unlabeled_dataset, CALIBRATION_DATASET_SIZE)
-
-# workaround for model deepcopy issue:
-# https://stackoverflow.com/questions/56590886/how-to-solve-the-run-time-error-only-tensors-created-explicitly-by-the-user-gr
-with torch.no_grad():
-    # Step 5. Create AutoQuant object
-    auto_quant = AutoQuant(quant_model,
-                        dummy_input,
-                        unlabeled_data_loader,
-                        eval_callback,
-                        param_bw=8,
-                        output_bw=16,
-                        config_file="backend_aware_htp_quantsim_config_v75.json")
-
-    # auto_quant.set_model_preparer_params(module_classes_to_exclude=[])
-    auto_quant.set_export_params(onnx_export_args=OnnxExportApiArgs(
-        opset_version=13,
-        input_names=input_names,
-        output_names=output_names
-    ))
-
-    # Step 6. (Optional) Set adaround params
-    ADAROUND_DATASET_SIZE = 1000
-    adaround_data_loader = _create_sampled_data_loader(unlabeled_dataset, ADAROUND_DATASET_SIZE)
-    adaround_params = AdaroundParameters(adaround_data_loader, num_batches=len(adaround_data_loader))
-    auto_quant.set_adaround_params(adaround_params)
-
-
-    auto_quant.set_mixed_precision_params(
-        candidates=[
-            ((16, QuantizationDataType.int), (8, QuantizationDataType.int)),      # W8A16
-            # ((8, QuantizationDataType.int), (8, QuantizationDataType.int)),       # W8A8
-            ((16, QuantizationDataType.float), (16, QuantizationDataType.float)), # FP16
-        ]
-    )
-
-    # Step 7. Run AutoQuant
-    # sim, initial_accuracy = auto_quant.run_inference()
-    # LOG.info(f"- Quantized Accuracy (before optimization): {initial_accuracy:.4f}")
-
-    optimized_model, optimized_accuracy, encoding_path, pareto_front = auto_quant.optimize(allowed_accuracy_drop=0.05)
-
-    if optimized_model is not None:
-        LOG.info(f"- Quantized Accuracy (after optimization):  {optimized_accuracy:.4f}, WER: {1 - optimized_accuracy:.4f}")
+for _ in range(1):
+    eval_result = eval_onnx_model(ort_session)
+    LOG.info(f"eval result: {eval_result}, WER: {1 - eval_result:.4f}")

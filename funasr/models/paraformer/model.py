@@ -465,6 +465,10 @@ class Paraformer(torch.nn.Module):
             # extract fbank feats
             time1 = time.perf_counter()
             audio_sample_list = load_audio_text_image_video(data_in, fs=frontend.fs, audio_fs=kwargs.get("fs", 16000), data_type=kwargs.get("data_type", "sound"), tokenizer=tokenizer)
+            # # [HEJUN]: padding to 4s
+            # for i, audio_sample in enumerate(audio_sample_list):
+            #     if audio_sample.size(0) < 4 * 16000:
+            #         audio_sample_list[i] = torch.nn.functional.pad(audio_sample, (0, 4 * 16000 - audio_sample.size(0)))
             time2 = time.perf_counter()
             meta_data["load_data"] = f"{time2 - time1:0.3f}"
             speech, speech_lengths = extract_fbank(audio_sample_list, data_type=kwargs.get("data_type", "sound"), frontend=frontend)

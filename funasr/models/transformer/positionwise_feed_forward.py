@@ -20,14 +20,16 @@ class PositionwiseFeedForward(torch.nn.Module):
         dropout_rate (float): Dropout rate.
 
     """
-
-    def __init__(self, idim, hidden_units, dropout_rate, activation=torch.nn.ReLU()):
+    # [HEJUN]: hack for aimet
+    # def __init__(self, idim, hidden_units, dropout_rate, activation=torch.nn.ReLU()):
+    def __init__(self, idim, hidden_units, dropout_rate):
         """Construct an PositionwiseFeedForward object."""
         super(PositionwiseFeedForward, self).__init__()
         self.w_1 = torch.nn.Linear(idim, hidden_units)
         self.w_2 = torch.nn.Linear(hidden_units, idim)
         self.dropout = torch.nn.Dropout(dropout_rate)
-        self.activation = activation
+        # self.activation = activation
+        self.activation = torch.nn.ReLU()
 
     def forward(self, x):
         """Forward function."""

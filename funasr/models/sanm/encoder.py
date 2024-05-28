@@ -531,6 +531,7 @@ class SANMEncoderExport(nn.Module):
             mask_4d_bhlt = 1 - mask[:, None, None, :]
         elif len(mask.shape) == 3:
             mask_4d_bhlt = 1 - mask[:, None, :]
+        # [HEJUN]: set to -128 for INT8 quantization
         mask_4d_bhlt = mask_4d_bhlt * -10000.0
         
         return mask_3d_btd, mask_4d_bhlt

@@ -20,13 +20,16 @@ class PositionwiseFeedForwardDecoderSANM(torch.nn.Module):
 
     """
 
-    def __init__(self, idim, hidden_units, dropout_rate, adim=None, activation=torch.nn.ReLU()):
+    # [HEJUN]: hack for aimet
+    # def __init__(self, idim, hidden_units, dropout_rate, adim=None, activation=torch.nn.ReLU()):
+    def __init__(self, idim, hidden_units, dropout_rate, adim=None):
         """Construct an PositionwiseFeedForward object."""
         super(PositionwiseFeedForwardDecoderSANM, self).__init__()
         self.w_1 = torch.nn.Linear(idim, hidden_units)
         self.w_2 = torch.nn.Linear(hidden_units, idim if adim is None else adim, bias=False)
         self.dropout = torch.nn.Dropout(dropout_rate)
-        self.activation = activation
+        # self.activation = activation
+        self.activation = torch.nn.ReLU()
         self.norm = LayerNorm(hidden_units)
 
     def forward(self, x):
