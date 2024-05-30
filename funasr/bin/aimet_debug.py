@@ -19,19 +19,6 @@ from funasr.utils.load_utils import load_audio_text_image_video, extract_fbank
 from funasr.models.paraformer.search import Hypothesis
 from compute_wer import Wer
 
-from aimet_common.quantsim_config import quantsim_config
-
-quantsim_config.ENFORCE_TARGET_DTYPE_BITWIDTH_CONFIG = True
-
-from aimet_common.defs import QuantizationDataType
-
-from aimet_torch.pro.model_preparer import prepare_model as prepare_model_pro
-from aimet_torch.model_validator.model_validator import ModelValidator
-from aimet_torch.adaround.adaround_weight import AdaroundParameters
-from aimet_torch.pro.auto_quant_v2 import AutoQuant
-from aimet_torch.onnx_utils import OnnxExportApiArgs
-
-
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO,
                     format="%(asctime)s %(module)-16.16s L%(lineno)-.4d %(levelname)-5.5s| %(message)s")
@@ -292,65 +279,35 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
 # valid = ModelValidator.validate_model(prepared_model, model_input=dummy_input)
 # LOG.info(f"Model validation result after prepare: {valid}")
 
-# predictor_dummy_input = torch.load('encoder_out.pt')
+# encoder_dummy_input = dummy_input
 
 # with torch.no_grad():
 #     torch.onnx.export(
-#         predictor_model.cpu(),
-#         predictor_dummy_input.cpu(), 
-#         "predictor.onnx",
+#         encoder_model.cpu(),
+#         encoder_dummy_input.cpu(), 
+#         "asr_encoder.onnx",
 #         verbose=False,
 #         opset_version=13,
 #         do_constant_folding=True,
-#         input_names=['encoder_out'],
-#         output_names=["pre_acoustic_embeds", "pre_token_length"]
+#         input_names=["speech"],
+#         output_names=["xs_pad"]
 #         # dynamic_axes=model.export_dynamic_axes()
 #     )
-# LOG.info(f"predictor model is saved as 'predictor.onnx'")
+# LOG.info(f"encoder model is saved as 'asr_encoder.onnx'")
 
-unlabeled_dataset = UnlabeledDatasetWrapper(eval_dataset)
-# unlabeled_dataset = UnlabeledDatasetWrapper(calibration_dataset)
-unlabeled_data_loader = _create_sampled_data_loader(unlabeled_dataset, CALIBRATION_DATASET_SIZE)
 
-# workaround for model deepcopy issue:
-# https://stackoverflow.com/questions/56590886/how-to-solve-the-run-time-error-only-tensors-created-explicitly-by-the-user-gr
+predictor_dummy_input = torch.load('encoder_out.pt')
+
 with torch.no_grad():
-    # Step 5. Create AutoQuant object
-    auto_quant = AutoQuant(quant_model,
-                        dummy_input,
-                        unlabeled_data_loader,
-                        eval_callback,
-                        param_bw=8,
-                        output_bw=16,
-                        config_file="backend_aware_htp_quantsim_config_v75.json")
-
-    # auto_quant.set_model_preparer_params(module_classes_to_exclude=[])
-    auto_quant.set_export_params(onnx_export_args=OnnxExportApiArgs(
+    torch.onnx.export(
+        predictor_model.cpu(),
+        predictor_dummy_input.cpu(), 
+        "asr_predictor.onnx",
+        verbose=False,
         opset_version=13,
-        input_names=input_names,
-        output_names=output_names
-    ))
-
-    # Step 6. (Optional) Set adaround params
-    ADAROUND_DATASET_SIZE = 1000
-    adaround_data_loader = _create_sampled_data_loader(unlabeled_dataset, ADAROUND_DATASET_SIZE)
-    adaround_params = AdaroundParameters(adaround_data_loader, num_batches=len(adaround_data_loader))
-    auto_quant.set_adaround_params(adaround_params)
-
-
-    auto_quant.set_mixed_precision_params(
-        candidates=[
-            ((16, QuantizationDataType.int), (8, QuantizationDataType.int)),      # W8A16
-            # ((8, QuantizationDataType.int), (8, QuantizationDataType.int)),       # W8A8
-            ((16, QuantizationDataType.float), (16, QuantizationDataType.float)), # FP16
-        ]
+        do_constant_folding=True,
+        input_names=['encoder_out'],
+        output_names=["pre_acoustic_embeds", "pre_token_length"]
+        # dynamic_axes=model.export_dynamic_axes()
     )
-
-    # Step 7. Run AutoQuant
-    # sim, initial_accuracy = auto_quant.run_inference()
-    # LOG.info(f"- Quantized Accuracy (before optimization): {initial_accuracy:.4f}")
-
-    optimized_model, optimized_accuracy, encoding_path, pareto_front = auto_quant.optimize(allowed_accuracy_drop=0.05)
-
-    if optimized_model is not None:
-        LOG.info(f"- Quantized Accuracy (after optimization):  {optimized_accuracy:.4f}, WER: {1 - optimized_accuracy:.4f}")
+LOG.info(f"predictor model is saved as 'asr_predictor.onnx'")

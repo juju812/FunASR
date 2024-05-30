@@ -5,6 +5,7 @@ import logging
 import sys
 import os
 import time
+from typing import Any
 from tqdm import tqdm
 
 import torch
@@ -23,13 +24,9 @@ from aimet_common.quantsim_config import quantsim_config
 
 quantsim_config.ENFORCE_TARGET_DTYPE_BITWIDTH_CONFIG = True
 
-from aimet_common.defs import QuantizationDataType
-
-from aimet_torch.pro.model_preparer import prepare_model as prepare_model_pro
-from aimet_torch.model_validator.model_validator import ModelValidator
-from aimet_torch.adaround.adaround_weight import AdaroundParameters
-from aimet_torch.pro.auto_quant_v2 import AutoQuant
-from aimet_torch.onnx_utils import OnnxExportApiArgs
+from aimet_torch.pro.model_preparer import prepare_model
+from aimet_common.defs import QuantScheme
+from aimet_torch.quant_analyzer import QuantAnalyzer, CallbackFunc
 
 
 
@@ -240,13 +237,17 @@ if QUANT_TARGET == "encoder":
     dummy_input = torch.load("encoder_inputs.pt").cuda()
     input_names = ["speech"]
     output_names = ["xs_pad"]
-    eval_dataset = AsrDataset(init_model_args["input"], automodel_kwargs)
+    eval_dataset = AsrDataset("/root/FunASR/funasr/bin/cbt1_testset_wo_prelabel/wav_filtered_50.scp", automodel_kwargs)
+    calibration_dataset = AsrDataset(init_model_args["input"], automodel_kwargs)
 else:
     quant_model = decoder_model
     dummy_input = torch.load("encoder_out.pt").cuda(), torch.load("pre_acoustic_embeds.pt").cuda(), torch.load("masks.pt").cuda()
     input_names = ["encoder_out", "pre_acoustic_embeds", "masks"]
     output_names = ["logits"]
-    eval_dataset = AsrDataset(init_model_args["input"], automodel_kwargs, encoder_model, predictor_model)
+    eval_dataset = AsrDataset("/root/FunASR/funasr/bin/cbt1_testset_wo_prelabel/wav_filtered_50.scp", automodel_kwargs, encoder_model, predictor_model)
+    calibration_dataset = AsrDataset(init_model_args["input"], automodel_kwargs, encoder_model, predictor_model)
+
+quant_prepared_model = prepare_model(quant_model, dummy_input)
 
 
 def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> float:
@@ -255,7 +256,8 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
 
     eval_data_loader = _create_sampled_data_loader(eval_dataset, num_samples)
     wer = Wer("/root/FunASR/funasr/bin/cbt1_testset_wo_prelabel/text")
-    pbar = tqdm(colour="blue", total=num_samples, dynamic_ncols=True)
+    # no process bar for analysis
+    # pbar = tqdm(colour="blue", total=num_samples, dynamic_ncols=True)
 
     with torch.no_grad():
         for inputs, keys in eval_data_loader:
@@ -267,7 +269,7 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
                 encoder_out, pre_acoustic_embeds, pre_token_length, masks = encoder_predictor_forward(inputs, model, predictor_model)
                 decoder_out = decoder_model(encoder_out, pre_acoustic_embeds, masks)
                 post_process(keys, decoder_out, pre_token_length, wer)
-                pbar.update(1)
+                # pbar.update(1)
             else:
                 encoder_out = inputs[0].cuda()
                 pre_acoustic_embeds = inputs[1].cuda()
@@ -275,22 +277,15 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
                 pre_token_length = torch.sum(masks == 1, dim=1).item()
                 decoder_out = model(encoder_out, pre_acoustic_embeds, masks)
                 post_process(keys, decoder_out, pre_token_length, wer)
-                pbar.update(1)
+                # pbar.update(1)
 
 
     return wer.summary()
 
-# for _ in range(1):
-#     eval_result = eval_callback(quant_model)
-#     LOG.info(f"eval result: {eval_result}, WER: {1 - eval_result:.4f}")
+# prepared_model = prepare_model_pro(quant_model, dummy_input)
 
 # valid = ModelValidator.validate_model(quant_model, model_input=dummy_input)
 # LOG.info(f"Model validation result: {valid}")
-
-# prepared_model = prepare_model_pro(quant_model, dummy_input)
-
-# valid = ModelValidator.validate_model(prepared_model, model_input=dummy_input)
-# LOG.info(f"Model validation result after prepare: {valid}")
 
 # predictor_dummy_input = torch.load('encoder_out.pt')
 
@@ -308,49 +303,42 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
 #     )
 # LOG.info(f"predictor model is saved as 'predictor.onnx'")
 
-unlabeled_dataset = UnlabeledDatasetWrapper(eval_dataset)
-# unlabeled_dataset = UnlabeledDatasetWrapper(calibration_dataset)
+# unlabeled_dataset = UnlabeledDatasetWrapper(eval_dataset)
+unlabeled_dataset = UnlabeledDatasetWrapper(calibration_dataset)
 unlabeled_data_loader = _create_sampled_data_loader(unlabeled_dataset, CALIBRATION_DATASET_SIZE)
+
+def forward_pass_callback(model: torch.nn.Module, _: Any = None) -> None:
+    with torch.no_grad():
+        for inputs in unlabeled_data_loader:
+            if QUANT_TARGET == "encoder":
+                inputs_cuda = inputs.cuda()
+                model(inputs_cuda)
+            else:
+                inputs_cuda = tuple(i.cuda() for i in inputs)
+                model(*inputs_cuda)
+
+
+forward_pass_callback_fn = CallbackFunc(forward_pass_callback)
+eval_callback_fn = CallbackFunc(eval_callback)
+
+for _ in range(1):
+    LOG.info(f"eval result: {eval_callback(quant_prepared_model)}")
 
 # workaround for model deepcopy issue:
 # https://stackoverflow.com/questions/56590886/how-to-solve-the-run-time-error-only-tensors-created-explicitly-by-the-user-gr
 with torch.no_grad():
-    # Step 5. Create AutoQuant object
-    auto_quant = AutoQuant(quant_model,
-                        dummy_input,
-                        unlabeled_data_loader,
-                        eval_callback,
-                        param_bw=8,
-                        output_bw=16,
-                        config_file="backend_aware_htp_quantsim_config_v75.json")
-
-    # auto_quant.set_model_preparer_params(module_classes_to_exclude=[])
-    auto_quant.set_export_params(onnx_export_args=OnnxExportApiArgs(
-        opset_version=13,
-        input_names=input_names,
-        output_names=output_names
-    ))
-
-    # Step 6. (Optional) Set adaround params
-    ADAROUND_DATASET_SIZE = 1000
-    adaround_data_loader = _create_sampled_data_loader(unlabeled_dataset, ADAROUND_DATASET_SIZE)
-    adaround_params = AdaroundParameters(adaround_data_loader, num_batches=len(adaround_data_loader))
-    auto_quant.set_adaround_params(adaround_params)
+    quant_analyzer = QuantAnalyzer(model=quant_prepared_model,
+                                    dummy_input=dummy_input,
+                                    forward_pass_callback=forward_pass_callback_fn,
+                                    eval_callback=eval_callback_fn)
+    # Approximately 256 images/samples are recommended for MSE loss analysis. So, if the dataloader
+    # has batch_size of 64, then 4 number of batches leads to 256 images/samples.
+    quant_analyzer.enable_per_layer_mse_loss(unlabeled_dataset_iterable=unlabeled_data_loader, num_batches=256)
 
 
-    auto_quant.set_mixed_precision_params(
-        candidates=[
-            ((16, QuantizationDataType.int), (8, QuantizationDataType.int)),      # W8A16
-            # ((8, QuantizationDataType.int), (8, QuantizationDataType.int)),       # W8A8
-            ((16, QuantizationDataType.float), (16, QuantizationDataType.float)), # FP16
-        ]
-    )
+    quant_analyzer.analyze(quant_scheme=QuantScheme.post_training_tf_enhanced,
+                        default_param_bw=8,
+                        default_output_bw=16,
+                        config_file="backend_aware_htp_quantsim_config_v75.json",
+                        results_dir="./quant_analyzer_results/")
 
-    # Step 7. Run AutoQuant
-    # sim, initial_accuracy = auto_quant.run_inference()
-    # LOG.info(f"- Quantized Accuracy (before optimization): {initial_accuracy:.4f}")
-
-    optimized_model, optimized_accuracy, encoding_path, pareto_front = auto_quant.optimize(allowed_accuracy_drop=0.05)
-
-    if optimized_model is not None:
-        LOG.info(f"- Quantized Accuracy (after optimization):  {optimized_accuracy:.4f}, WER: {1 - optimized_accuracy:.4f}")
