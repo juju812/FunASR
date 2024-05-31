@@ -229,19 +229,19 @@ if EVAL_TARGET == "encoder":
     input_names = ["speech"]
     output_names = ["xs_pad"]
     eval_dataset = AsrDataset(init_model_args["input"], automodel_kwargs)
-    ort_session = ort.InferenceSession("/root/asr_w8a16/w8a16_asr_encoder.onnx")
+    ort_session = ort.InferenceSession("/root/asr_w8a16/w8a16_asr_encoder.onnx", providers=['CUDAExecutionProvider'])
 else:
     quant_model = decoder_model
     dummy_input = torch.load("encoder_out.pt").cuda(), torch.load("pre_acoustic_embeds.pt").cuda(), torch.load("masks.pt").cuda()
     input_names = ["encoder_out", "pre_acoustic_embeds", "masks"]
     output_names = ["logits"]
     eval_dataset = AsrDataset(init_model_args["input"], automodel_kwargs, encoder_model, predictor_model)
-    ort_session = ort.InferenceSession("/root/asr_w8a16/w8a16_asr_decoder.onnx")
+    ort_session = ort.InferenceSession("/root/asr_w8a16/w8a16_asr_decoder.onnx", providers=['CUDAExecutionProvider'])
 
-if 'CUDAExecutionProvider' in ort.get_available_providers():
-    ort_session.set_providers(['CUDAExecutionProvider'])
-else:
-    LOG.warning("WARNING: CUDAExecutionProvider not available, fallback to CPU.")
+# if 'CUDAExecutionProvider' in ort.get_available_providers():
+#     ort_session.set_providers(['CUDAExecutionProvider'])
+# else:
+#     LOG.warning("WARNING: CUDAExecutionProvider not available, fallback to CPU.")
 
 
 def eval_onnx_model(ort_session: ort.InferenceSession, num_samples: Optional[int] = None) -> float:
@@ -263,7 +263,7 @@ def eval_onnx_model(ort_session: ort.InferenceSession, num_samples: Optional[int
                 encoder_out = ort_session.run(None, ort_inputs)[0]
                 encoder_out = torch.tensor(encoder_out).cuda()
 
-                pre_acoustic_embeds, pre_token_length, masks = predictor_forward(inputs, predictor_model)
+                pre_acoustic_embeds, pre_token_length, masks = predictor_forward(encoder_out, predictor_model)
                 decoder_out = decoder_model(encoder_out, pre_acoustic_embeds, masks)
                 post_process(keys, decoder_out, pre_token_length, wer)
                 pbar.update(1)
