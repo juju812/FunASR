@@ -6,6 +6,12 @@ import sys
 import os
 import time
 from tqdm import tqdm
+import numpy as np
+from typing import List
+
+import onnx
+import onnxruntime as ort
+from onnxruntime.quantization.onnx_quantizer import ONNXModel
 
 import torch
 from torch import nn
@@ -24,13 +30,8 @@ from aimet_common.quantsim_config import quantsim_config
 quantsim_config.ENFORCE_TARGET_DTYPE_BITWIDTH_CONFIG = True
 
 from aimet_common.defs import QuantizationDataType
-
-from aimet_torch.pro.model_preparer import prepare_model as prepare_model_pro
-from aimet_torch.model_validator.model_validator import ModelValidator
-from aimet_torch.adaround.adaround_weight import AdaroundParameters
-from aimet_torch.pro.auto_quant_v2 import AutoQuant
-from aimet_torch.onnx_utils import OnnxExportApiArgs
-
+from aimet_onnx.pro.auto_quant_v2 import AutoQuant
+from aimet_onnx.adaround.adaround_weight import AdaroundParameters
 
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO,
@@ -46,9 +47,7 @@ LOG = logging.getLogger()
 LOG.addHandler(handler)
 
 
-def encoder_predictor_forward(inputs_cuda: torch.Tensor, encoder_model, predictor_model: nn.Module):
-    # torch.save(inputs_cuda, 'encoder_inputs.pt')
-    encoder_out = encoder_model(inputs_cuda)
+def predictor_forward(encoder_out: torch.Tensor, predictor_model: nn.Module):
     # torch.save(encoder_out, 'encoder_out.pt')
     pre_acoustic_embeds, pre_token_length = predictor_model(encoder_out)
     # 将pre_acoustic_embeds填充至(1, 68, 512)
@@ -60,7 +59,7 @@ def encoder_predictor_forward(inputs_cuda: torch.Tensor, encoder_model, predicto
     masks[0, :pre_token_length] = 1
     # torch.save(pre_acoustic_embeds, 'pre_acoustic_embeds.pt')
     # torch.save(masks, 'masks.pt')
-    return encoder_out, pre_acoustic_embeds, pre_token_length, masks
+    return pre_acoustic_embeds, pre_token_length, masks
 
 
 class AsrDataset(Dataset):
@@ -102,7 +101,8 @@ class AsrDataset(Dataset):
 
         # decoder dataset
         inputs_cuda = speech.cuda()
-        encoder_out, pre_acoustic_embeds, pre_token_length, masks = encoder_predictor_forward(inputs_cuda, self.encoder_model, self.predictor_model)
+        encoder_out = self.encoder_model(inputs_cuda)
+        pre_acoustic_embeds, pre_token_length, masks = predictor_forward(encoder_out, self.predictor_model)
         return (encoder_out.squeeze(dim=0).cpu(), pre_acoustic_embeds.squeeze(dim=0).cpu(), masks.squeeze(dim=0).cpu()), key
 
 
@@ -162,6 +162,34 @@ def _create_sampled_data_loader(dataset, num_samples):
                       sampler=_subset_samplers[num_samples],
                       batch_size=BATCH_SIZE)
 
+class ONNXDataLoader:
+    def __init__(self, torch_dataloader: DataLoader):
+        self._torch_dataloader = torch_dataloader
+
+    def __iter__(self):
+        for inputs, keys in self._torch_dataloader:
+            # Convert inputs to numpy arrays
+            inputs = inputs.unsqueeze(dim=0).numpy()
+            yield inputs, keys
+
+    def __len__(self):
+        return self._torch_dataloader.__len__()
+
+
+class UnlabeledONNXDataLoader:
+    def __init__(self, torch_dataloader: DataLoader):
+        self._torch_dataloader = torch_dataloader
+
+    def __iter__(self):
+        for inputs, _ in self._torch_dataloader:
+            # Convert inputs to numpy arrays
+            inputs = inputs.numpy()
+            yield inputs
+
+    def __len__(self):
+        return self._torch_dataloader.__len__()
+
+
 # Step 2. Prepare model and dataset
 init_model_args = {
 	"model": "/project/asr_game_test/01_asr/04_funasr_latest/FunASR-1.0.14-v2/examples/industrial_data_pretraining/modelscope_models/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
@@ -190,20 +218,6 @@ encoder_model = ParaformerEncoder(paraformer_model).cuda().eval()
 predictor_model = ParaformerPredictor(paraformer_model).cuda().eval()
 decoder_model = ParaformerDecoder(paraformer_model).cuda().eval()
 
-
-# Step 3. Prepare unlabeled dataset
-# NOTE: In the actual use cases, the users should implement this part to serve
-#       their own goals if necessary.
-class UnlabeledDatasetWrapper(Dataset):
-    def __init__(self, dataset):
-        self._dataset = dataset
-
-    def __len__(self):
-        return len(self._dataset)
-
-    def __getitem__(self, index):
-        input, _ = self._dataset[index]
-        return input
 
 # Step 4. Prepare eval callback
 # NOTE: In the actual use cases, the users should implement this part to serve
@@ -240,48 +254,62 @@ def post_process(keys, decoder_out, pre_token_length, wer):
 
 
 if QUANT_TARGET == "encoder":
-    quant_model = encoder_model
-    dummy_input = torch.load("encoder_inputs.pt").cuda()
+    org_model = onnx.load("asr_encoder.onnx")
+    quant_model = ONNXModel(org_model)
+    dummy_input = {"speech": torch.load("encoder_inputs.pt").numpy().astype(np.float32)}
     input_names = ["speech"]
     output_names = ["xs_pad"]
     eval_dataset = AsrDataset(init_model_args["input"], automodel_kwargs)
     calibration_dataset = AsrDataset("/root/FunASR/funasr/bin/asr_train_dataset/train_wav_filtered.scp", automodel_kwargs)
 else:
-    quant_model = decoder_model
-    dummy_input = torch.load("encoder_out.pt").cuda(), torch.load("pre_acoustic_embeds.pt").cuda(), torch.load("masks.pt").cuda()
+    org_model = onnx.load("asr_decoder.onnx")
+    quant_model = ONNXModel(org_model)
+    dummy_input = {
+        "encoder_out": torch.load("encoder_out.pt").numpy().astype(np.float32), 
+        "pre_acoustic_embeds": torch.load("pre_acoustic_embeds.pt").numpy().astype(np.float32), 
+        "masks": torch.load("masks.pt").numpy().astype(np.float32)
+    }
     input_names = ["encoder_out", "pre_acoustic_embeds", "masks"]
     output_names = ["logits"]
     eval_dataset = AsrDataset(init_model_args["input"], automodel_kwargs, encoder_model, predictor_model)
     calibration_dataset = AsrDataset("/root/FunASR/funasr/bin/asr_train_dataset/train_wav_filtered.scp", automodel_kwargs, encoder_model, predictor_model)
 
 
-def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> float:
+def eval_callback(ort_session: ort.InferenceSession, num_samples: Optional[int] = None) -> float:
     if num_samples is None:
         num_samples = len(eval_dataset)
         # num_samples = 10
 
-    eval_data_loader = _create_sampled_data_loader(eval_dataset, num_samples)
+    eval_data_loader = ONNXDataLoader(_create_sampled_data_loader(eval_dataset, num_samples))
     wer = Wer("/root/FunASR/funasr/bin/cbt1_testset_wo_prelabel/text")
     # wer = Wer("/root/FunASR/funasr/bin/asr_train_dataset/text")
     pbar = tqdm(colour="blue", total=num_samples, dynamic_ncols=True)
 
     with torch.no_grad():
-        for inputs, keys in eval_data_loader:
-            if isinstance(inputs, torch.Tensor) and inputs.numel() == 0:
-                continue
-            # FIXME: batch_size should be 1, due to fixed shape in models
-            if QUANT_TARGET == "encoder":
-                inputs = inputs.cuda()
-                encoder_out, pre_acoustic_embeds, pre_token_length, masks = encoder_predictor_forward(inputs, model, predictor_model)
+        # FIXME: batch_size should be 1, due to fixed shape in models
+        if QUANT_TARGET == "encoder":
+            for inputs, keys in eval_data_loader:
+                if isinstance(inputs, torch.Tensor) and inputs.numel() == 0:
+                    continue
+                # onnxruntime inference
+                ort_inputs = dict(zip(input_names, inputs))
+                encoder_out = ort_session.run(None, ort_inputs)[0]
+                encoder_out = torch.tensor(encoder_out).cuda()
+
+                pre_acoustic_embeds, pre_token_length, masks = predictor_forward(encoder_out, predictor_model)
                 decoder_out = decoder_model(encoder_out, pre_acoustic_embeds, masks)
                 post_process(keys, decoder_out, pre_token_length, wer)
                 pbar.update(1)
-            else:
-                encoder_out = inputs[0].cuda()
-                pre_acoustic_embeds = inputs[1].cuda()
-                masks = inputs[2].cuda()
-                pre_token_length = torch.sum(masks == 1, dim=1).item()
-                decoder_out = model(encoder_out, pre_acoustic_embeds, masks)
+        else:
+            for inputs, keys in eval_data_loader:
+                if isinstance(inputs, torch.Tensor) and inputs.numel() == 0:
+                    continue
+                pre_acoustic_embeds = torch.tensor(inputs["pre_acoustic_embeds"]).cuda()
+                pre_token_length = torch.sum(pre_acoustic_embeds == 1, dim=1).item()
+                ort_inputs = dict(zip(input_names, inputs))
+                decoder_out = ort_session.run(None, ort_inputs)[0]
+                decoder_out = torch.tensor(decoder_out).cuda()
+                # decoder_out = decoder_model(encoder_out, pre_acoustic_embeds, masks)
                 post_process(keys, decoder_out, pre_token_length, wer)
                 pbar.update(1)
 
@@ -317,8 +345,7 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
 # LOG.info(f"predictor model is saved as 'predictor.onnx'")
 
 # unlabeled_dataset = UnlabeledDatasetWrapper(eval_dataset)
-unlabeled_dataset = UnlabeledDatasetWrapper(calibration_dataset)
-unlabeled_data_loader = _create_sampled_data_loader(unlabeled_dataset, CALIBRATION_DATASET_SIZE)
+unlabeled_data_loader = UnlabeledONNXDataLoader(_create_sampled_data_loader(calibration_dataset, CALIBRATION_DATASET_SIZE))
 
 # workaround for model deepcopy issue:
 # https://stackoverflow.com/questions/56590886/how-to-solve-the-run-time-error-only-tensors-created-explicitly-by-the-user-gr
@@ -328,22 +355,16 @@ with torch.no_grad():
                         dummy_input,
                         unlabeled_data_loader,
                         eval_callback,
+                        use_cuda=True,
                         param_bw=8,
                         output_bw=16,
                         config_file="backend_aware_htp_quantsim_config_v75.json")
 
-    # auto_quant.set_model_preparer_params(module_classes_to_exclude=[])
-    auto_quant.set_export_params(onnx_export_args=OnnxExportApiArgs(
-        # set opset_version, to align with prepare_model_pro
-        opset_version=12,
-        # do_constant_folding=True,
-        input_names=input_names,
-        output_names=output_names
-    ))
 
     # Step 6. (Optional) Set adaround params
     ADAROUND_DATASET_SIZE = 1000
-    adaround_data_loader = _create_sampled_data_loader(unlabeled_dataset, ADAROUND_DATASET_SIZE)
+    # ADAROUND_DATASET_SIZE = 10
+    adaround_data_loader = UnlabeledONNXDataLoader(_create_sampled_data_loader(calibration_dataset, ADAROUND_DATASET_SIZE))
     adaround_params = AdaroundParameters(adaround_data_loader, num_batches=len(adaround_data_loader))
     auto_quant.set_adaround_params(adaround_params)
 

@@ -19,6 +19,9 @@ from funasr.utils.load_utils import load_audio_text_image_video, extract_fbank
 from funasr.models.paraformer.search import Hypothesis
 from compute_wer import Wer
 
+from aimet_torch.model_validator.model_validator import ModelValidator
+from aimet_torch.pro.model_preparer import prepare_model as prepare_model_pro
+
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO,
                     format="%(asctime)s %(module)-16.16s L%(lineno)-.4d %(levelname)-5.5s| %(message)s")
@@ -129,7 +132,7 @@ class ParaformerDecoder(nn.Module):
 
 # ==================================================================================
 # Step 1. Define constants and helper functions
-QUANT_TARGET = "encoder"  # encoder or decoder
+QUANT_TARGET = "decoder"  # encoder or decoder
 # EVAL_DATASET_SIZE = 1571
 EVAL_DATASET_SIZE = 1114
 CALIBRATION_DATASET_SIZE = 1000
@@ -274,40 +277,40 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
 # valid = ModelValidator.validate_model(quant_model, model_input=dummy_input)
 # LOG.info(f"Model validation result: {valid}")
 
-# prepared_model = prepare_model_pro(quant_model, dummy_input)
+# prepared_model = prepare_model_pro(quant_model, dummy_input, input_names=input_names, output_names=output_names)
 
 # valid = ModelValidator.validate_model(prepared_model, model_input=dummy_input)
 # LOG.info(f"Model validation result after prepare: {valid}")
 
-# encoder_dummy_input = dummy_input
-
-# with torch.no_grad():
-#     torch.onnx.export(
-#         encoder_model.cpu(),
-#         encoder_dummy_input.cpu(), 
-#         "asr_encoder.onnx",
-#         verbose=False,
-#         opset_version=13,
-#         do_constant_folding=True,
-#         input_names=["speech"],
-#         output_names=["xs_pad"]
-#         # dynamic_axes=model.export_dynamic_axes()
-#     )
-# LOG.info(f"encoder model is saved as 'asr_encoder.onnx'")
-
-
-predictor_dummy_input = torch.load('encoder_out.pt')
+encoder_dummy_input = dummy_input
 
 with torch.no_grad():
     torch.onnx.export(
-        predictor_model.cpu(),
-        predictor_dummy_input.cpu(), 
-        "asr_predictor.onnx",
+        encoder_model.cpu(),
+        encoder_dummy_input.cpu(), 
+        "asr_encoder.onnx",
         verbose=False,
-        opset_version=13,
+        opset_version=12,
         do_constant_folding=True,
-        input_names=['encoder_out'],
-        output_names=["pre_acoustic_embeds", "pre_token_length"]
+        input_names=["speech"],
+        output_names=["xs_pad"]
         # dynamic_axes=model.export_dynamic_axes()
     )
-LOG.info(f"predictor model is saved as 'asr_predictor.onnx'")
+LOG.info(f"encoder model is saved as 'asr_encoder.onnx'")
+
+
+# predictor_dummy_input = torch.load('encoder_out.pt')
+
+# with torch.no_grad():
+#     torch.onnx.export(
+#         predictor_model.cpu(),
+#         predictor_dummy_input.cpu(), 
+#         "asr_predictor.onnx",
+#         verbose=False,
+#         opset_version=12,
+#         do_constant_folding=True,
+#         input_names=['encoder_out'],
+#         output_names=["pre_acoustic_embeds", "pre_token_length"]
+#         # dynamic_axes=model.export_dynamic_axes()
+#     )
+# LOG.info(f"predictor model is saved as 'asr_predictor.onnx'")
