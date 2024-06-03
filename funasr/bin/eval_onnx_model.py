@@ -222,6 +222,10 @@ def post_process(keys, decoder_out, pre_token_length, wer):
         token = tokenizer.ids2tokens(token_int)
         wer.compute_wer(keys[i], token)  
 
+sess_options = ort.SessionOptions()
+# [HEJUN]: get rid of pthread_setaffinity_np failed
+sess_options.intra_op_num_threads = 6
+sess_options.inter_op_num_threads = 6
 
 if EVAL_TARGET == "encoder":
     quant_model = encoder_model
@@ -229,14 +233,15 @@ if EVAL_TARGET == "encoder":
     input_names = ["speech"]
     output_names = ["xs_pad"]
     eval_dataset = AsrDataset(init_model_args["input"], automodel_kwargs)
-    ort_session = ort.InferenceSession("/root/asr_w8a16/w8a16_asr_encoder.onnx", providers=['CUDAExecutionProvider'])
+    ort_session = ort.InferenceSession("/root/asr_w8a16/w8a16_asr_encoder.onnx", sess_options=sess_options, providers=['CUDAExecutionProvider'])
 else:
     quant_model = decoder_model
     dummy_input = torch.load("encoder_out.pt").cuda(), torch.load("pre_acoustic_embeds.pt").cuda(), torch.load("masks.pt").cuda()
     input_names = ["encoder_out", "pre_acoustic_embeds", "masks"]
     output_names = ["logits"]
     eval_dataset = AsrDataset(init_model_args["input"], automodel_kwargs, encoder_model, predictor_model)
-    ort_session = ort.InferenceSession("/root/asr_w8a16/w8a16_asr_decoder.onnx", providers=['CUDAExecutionProvider'])
+    ort_session = ort.InferenceSession("/root/asr_w8a16/w8a16_asr_decoder.onnx", sess_options=sess_options, providers=['CUDAExecutionProvider'])
+
 
 # if 'CUDAExecutionProvider' in ort.get_available_providers():
 #     ort_session.set_providers(['CUDAExecutionProvider'])
