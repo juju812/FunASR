@@ -53,7 +53,7 @@ def predictor_forward(encoder_out: torch.Tensor, predictor_model: nn.Module):
     masks[0, :pre_token_length] = 1
     # torch.save(pre_acoustic_embeds, 'pre_acoustic_embeds.pt')
     # torch.save(masks, 'masks.pt')
-    return encoder_out, pre_acoustic_embeds, pre_token_length, masks
+    return pre_acoustic_embeds, pre_token_length, masks
 
 
 class AsrDataset(Dataset):
