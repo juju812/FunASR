@@ -46,10 +46,7 @@ LOG = logging.getLogger()
 LOG.addHandler(handler)
 
 
-def encoder_predictor_forward(inputs_cuda: torch.Tensor, encoder_model, predictor_model: nn.Module):
-    # torch.save(inputs_cuda, 'encoder_inputs.pt')
-    encoder_out = encoder_model(inputs_cuda)
-    # torch.save(encoder_out, 'encoder_out.pt')
+def predictor_forward(encoder_out: torch.Tensor, predictor_model: nn.Module):
     pre_acoustic_embeds, pre_token_length = predictor_model(encoder_out)
     # 将pre_acoustic_embeds填充至(1, 68, 512)
     padding_size = 68 - pre_acoustic_embeds.size(1)
@@ -60,7 +57,7 @@ def encoder_predictor_forward(inputs_cuda: torch.Tensor, encoder_model, predicto
     masks[0, :pre_token_length] = 1
     # torch.save(pre_acoustic_embeds, 'pre_acoustic_embeds.pt')
     # torch.save(masks, 'masks.pt')
-    return encoder_out, pre_acoustic_embeds, pre_token_length, masks
+    return pre_acoustic_embeds, pre_token_length, masks
 
 
 class AsrDataset(Dataset):
@@ -102,7 +99,8 @@ class AsrDataset(Dataset):
 
         # decoder dataset
         inputs_cuda = speech.cuda()
-        encoder_out, pre_acoustic_embeds, pre_token_length, masks = encoder_predictor_forward(inputs_cuda, self.encoder_model, self.predictor_model)
+        encoder_out = self.encoder_model(inputs_cuda)
+        pre_acoustic_embeds, pre_token_length, masks = predictor_forward(encoder_out, self.predictor_model)
         return (encoder_out.squeeze(dim=0).cpu(), pre_acoustic_embeds.squeeze(dim=0).cpu(), masks.squeeze(dim=0).cpu()), key
 
 
@@ -149,7 +147,7 @@ QUANT_TARGET = "encoder"  # encoder or decoder
 # EVAL_DATASET_SIZE = 1571
 EVAL_DATASET_SIZE = 1114
 CALIBRATION_DATASET_SIZE = 1000
-# CALIBRATION_DATASET_SIZE = 10
+# CALIBRATION_DATASET_SIZE = 100
 BATCH_SIZE = 1
 
 _subset_samplers = {}
@@ -272,7 +270,10 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
             # FIXME: batch_size should be 1, due to fixed shape in models
             if QUANT_TARGET == "encoder":
                 inputs = inputs.cuda()
-                encoder_out, pre_acoustic_embeds, pre_token_length, masks = encoder_predictor_forward(inputs, model, predictor_model)
+                # torch.save(inputs, 'encoder_inputs.pt')
+                encoder_out = model(inputs)
+                # torch.save(encoder_out, 'encoder_out.pt')
+                pre_acoustic_embeds, pre_token_length, masks = predictor_forward(encoder_out, predictor_model)
                 decoder_out = decoder_model(encoder_out, pre_acoustic_embeds, masks)
                 post_process(keys, decoder_out, pre_token_length, wer)
                 pbar.update(1)
@@ -320,6 +321,9 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
 unlabeled_dataset = UnlabeledDatasetWrapper(calibration_dataset)
 unlabeled_data_loader = _create_sampled_data_loader(unlabeled_dataset, CALIBRATION_DATASET_SIZE)
 
+# workaround for module of aimet op is None
+# quant_model = prepare_model_pro(quant_model, dummy_input)
+
 # workaround for model deepcopy issue:
 # https://stackoverflow.com/questions/56590886/how-to-solve-the-run-time-error-only-tensors-created-explicitly-by-the-user-gr
 with torch.no_grad():
@@ -343,6 +347,7 @@ with torch.no_grad():
 
     # Step 6. (Optional) Set adaround params
     ADAROUND_DATASET_SIZE = 1000
+    # ADAROUND_DATASET_SIZE = 100
     adaround_data_loader = _create_sampled_data_loader(unlabeled_dataset, ADAROUND_DATASET_SIZE)
     adaround_params = AdaroundParameters(adaround_data_loader, num_batches=len(adaround_data_loader))
     auto_quant.set_adaround_params(adaround_params)

@@ -42,11 +42,7 @@ handler.setFormatter(logging_format)
 LOG = logging.getLogger()
 LOG.addHandler(handler)
 
-
-def encoder_predictor_forward(inputs_cuda: torch.Tensor, encoder_model, predictor_model: nn.Module):
-    # torch.save(inputs_cuda, 'encoder_inputs.pt')
-    encoder_out = encoder_model(inputs_cuda)
-    # torch.save(encoder_out, 'encoder_out.pt')
+def predictor_forward(encoder_out: torch.Tensor, predictor_model: nn.Module):
     pre_acoustic_embeds, pre_token_length = predictor_model(encoder_out)
     # 将pre_acoustic_embeds填充至(1, 68, 512)
     padding_size = 68 - pre_acoustic_embeds.size(1)
@@ -96,7 +92,8 @@ class AsrDataset(Dataset):
 
         # decoder dataset
         inputs_cuda = speech.cuda()
-        encoder_out, pre_acoustic_embeds, pre_token_length, masks = encoder_predictor_forward(inputs_cuda, self.encoder_model, self.predictor_model)
+        encoder_out = self.encoder_model(inputs_cuda)
+        pre_acoustic_embeds, pre_token_length, masks = predictor_forward(encoder_out, self.predictor_model)
         return (encoder_out.squeeze(dim=0).cpu(), pre_acoustic_embeds.squeeze(dim=0).cpu(), masks.squeeze(dim=0).cpu()), key
 
 
@@ -266,7 +263,10 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
             # FIXME: batch_size should be 1, due to fixed shape in models
             if QUANT_TARGET == "encoder":
                 inputs = inputs.cuda()
-                encoder_out, pre_acoustic_embeds, pre_token_length, masks = encoder_predictor_forward(inputs, model, predictor_model)
+                # torch.save(inputs, 'encoder_inputs.pt')
+                encoder_out = model(inputs)
+                # torch.save(encoder_out, 'encoder_out.pt')
+                pre_acoustic_embeds, pre_token_length, masks = predictor_forward(encoder_out, predictor_model)
                 decoder_out = decoder_model(encoder_out, pre_acoustic_embeds, masks)
                 post_process(keys, decoder_out, pre_token_length, wer)
                 # pbar.update(1)
@@ -339,6 +339,6 @@ with torch.no_grad():
     quant_analyzer.analyze(quant_scheme=QuantScheme.post_training_tf_enhanced,
                         default_param_bw=8,
                         default_output_bw=16,
-                        config_file="backend_aware_htp_quantsim_config_v75.json",
+                        config_file="backend_aware_htp_quantsim_config_v75_all_quant.json",
                         results_dir="./quant_analyzer_results/")
 

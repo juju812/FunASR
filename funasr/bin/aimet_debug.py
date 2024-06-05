@@ -132,7 +132,7 @@ class ParaformerDecoder(nn.Module):
 
 # ==================================================================================
 # Step 1. Define constants and helper functions
-QUANT_TARGET = "decoder"  # encoder or decoder
+QUANT_TARGET = "encoder"  # encoder or decoder
 # EVAL_DATASET_SIZE = 1571
 EVAL_DATASET_SIZE = 1114
 CALIBRATION_DATASET_SIZE = 1000
@@ -226,7 +226,9 @@ def post_process(keys, decoder_out, pre_token_length, wer):
 
 
 if QUANT_TARGET == "encoder":
-    quant_model = encoder_model
+    # quant_model = encoder_model
+    qat_model = torch.jit.load("/root/bak_asr_w8a16/w8a16_asr_encoder_embedded.torchscript.pth")
+    quant_model = torch.quantization.convert(qat_model).cuda()
     dummy_input = torch.load("encoder_inputs.pt").cuda()
     input_names = ["speech"]
     output_names = ["xs_pad"]
@@ -270,9 +272,9 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
 
     return wer.summary()
 
-# for _ in range(1):
-#     eval_result = eval_callback(quant_model)
-#     LOG.info(f"eval result: {eval_result}, WER: {1 - eval_result:.4f}")
+for _ in range(1):
+    eval_result = eval_callback(quant_model)
+    LOG.info(f"eval result: {eval_result}, WER: {1 - eval_result:.4f}")
 
 # valid = ModelValidator.validate_model(quant_model, model_input=dummy_input)
 # LOG.info(f"Model validation result: {valid}")
@@ -282,21 +284,25 @@ def eval_callback(model: torch.nn.Module, num_samples: Optional[int] = None) -> 
 # valid = ModelValidator.validate_model(prepared_model, model_input=dummy_input)
 # LOG.info(f"Model validation result after prepare: {valid}")
 
-encoder_dummy_input = dummy_input
+script_module = torch.jit.script(quant_model)
+script_module.save("/root/bak_asr_w8a16/w8a16_asr_encoder_quant.torchscript.pth")
 
-with torch.no_grad():
-    torch.onnx.export(
-        encoder_model.cpu(),
-        encoder_dummy_input.cpu(), 
-        "asr_encoder.onnx",
-        verbose=False,
-        opset_version=12,
-        do_constant_folding=True,
-        input_names=["speech"],
-        output_names=["xs_pad"]
-        # dynamic_axes=model.export_dynamic_axes()
-    )
-LOG.info(f"encoder model is saved as 'asr_encoder.onnx'")
+encoder_dummy_input = dummy_input
+# encoder_quant_model = quant_model
+
+# with torch.no_grad():
+#     torch.onnx.export(
+#         encoder_model.cpu(),
+#         encoder_dummy_input.cpu(), 
+#         "asr_encoder.onnx",
+#         verbose=False,
+#         opset_version=12,
+#         do_constant_folding=True,
+#         input_names=["speech"],
+#         output_names=["xs_pad"]
+#         # dynamic_axes=model.export_dynamic_axes()
+#     )
+# LOG.info(f"encoder model is saved as 'asr_encoder_quant.onnx'")
 
 
 # predictor_dummy_input = torch.load('encoder_out.pt')
