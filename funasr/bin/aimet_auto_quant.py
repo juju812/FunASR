@@ -164,7 +164,8 @@ def _create_sampled_data_loader(dataset, num_samples):
 init_model_args = {
 	"model": "/project/asr_game_test/01_asr/04_funasr_latest/FunASR-1.0.14-v2/examples/industrial_data_pretraining/modelscope_models/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
 	"model_revision": "v2.0.4",
-	"init_param": "/project/users/zhangqing/asr_paraformer_models_20240520/l22_asr_model/model.pt",
+	# "init_param": "/project/users/zhangqing/asr_paraformer_models_20240520/l22_asr_model/model.pt",
+    "init_param": "/project/users/zhangqing/asr_paraformer_models_20240608/model.pt",
 	"tokenizer_conf": {
 		"token_list": "/project/asr_game_test/01_asr/04_funasr_latest/FunASR-1.0.14-v2/examples/industrial_data_pretraining/modelscope_models/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/tokens.json"
 	},
@@ -334,7 +335,7 @@ with torch.no_grad():
                         eval_callback,
                         param_bw=8,
                         output_bw=16,
-                        config_file="backend_aware_htp_quantsim_config_v75.json")
+                        config_file="backend_aware_htp_quantsim_config_v75_all_quant.json")
 
     # auto_quant.set_model_preparer_params(module_classes_to_exclude=[])
     auto_quant.set_export_params(onnx_export_args=OnnxExportApiArgs(
